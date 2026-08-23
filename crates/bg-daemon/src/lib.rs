@@ -1,5 +1,6 @@
 pub mod routes;
 pub mod state;
+pub mod watcher;
 
 use std::path::PathBuf;
 
@@ -36,6 +37,11 @@ pub async fn run_with_dir(dir: PathBuf) -> anyhow::Result<()> {
     // Crash-safety: re-scan every registered repo BEFORE serving, so edits
     // made while the daemon was down land in the oplog (spec: error handling).
     state.snapshot_all_repos().await;
+
+    // Auto-snapshot on file changes: watch every registered root; repos
+    // registered later are added via DaemonState::register -> watch_path.
+    let roots = state.list().await.into_iter().map(|info| (info.id, info.root)).collect();
+    state.set_watcher(watcher::spawn(state.clone(), roots)?);
 
     let sock = dir.join("bgd.sock");
     let _ = std::fs::remove_file(&sock);

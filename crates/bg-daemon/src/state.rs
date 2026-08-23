@@ -20,6 +20,10 @@ struct Inner {
     /// (name, email) used for jj commits, from `git config` at load time.
     identity: (String, String),
     repos: RwLock<HashMap<String, RepoHandle>>,
+    /// The filesystem watcher, installed by `run_with_dir` after the startup
+    /// re-scan (`None` until then, and in tests that never start one).
+    /// Dropping the handle stops watching, so it lives here.
+    watcher: std::sync::Mutex<Option<crate::watcher::WatcherHandle>>,
 }
 
 #[derive(Clone)]
@@ -84,6 +88,7 @@ impl DaemonState {
                 state_dir: dir.to_path_buf(),
                 identity,
                 repos: RwLock::new(repos),
+                watcher: std::sync::Mutex::new(None),
             }),
         };
         if dropped_any {
@@ -135,7 +140,22 @@ impl DaemonState {
             repos.remove(&id);
             return Err(RegisterError::Internal(err));
         }
+
+        // Auto-snapshot the new repo on file changes. A watch failure loses
+        // auto-snapshot only (explicit API calls still work), so it degrades
+        // to a warning rather than failing the registration.
+        if let Some(watcher) = self.inner.watcher.lock().unwrap().as_ref()
+            && let Err(err) = watcher.watch_path(info.id.clone(), info.root.clone())
+        {
+            tracing::warn!(id = %info.id.0, "failed to watch repo root: {err:#}");
+        }
         Ok(info)
+    }
+
+    /// Installs the filesystem watcher handle (see `watcher::spawn`), keeping
+    /// it alive for the daemon's lifetime.
+    pub fn set_watcher(&self, watcher: crate::watcher::WatcherHandle) {
+        *self.inner.watcher.lock().unwrap() = Some(watcher);
     }
 
     /// Looks up a repo by id, or by any absolute path inside a registered

@@ -25,7 +25,7 @@ impl crate::RepoEngine {
         let workspace = self
             .workspaces
             .get_mut(ws)
-            .ok_or_else(|| anyhow::anyhow!("no workspace {ws}"))?;
+            .ok_or_else(|| crate::EngineError::NotFound(format!("no workspace {ws}")))?;
         let workspace_name = workspace.workspace_name().to_owned();
 
         let mut locked_ws = workspace.start_working_copy_mutation().await?;

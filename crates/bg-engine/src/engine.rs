@@ -110,7 +110,10 @@ impl RepoEngine {
             })
             .collect();
         match matches.len() {
-            0 => anyhow::bail!("no visible commit matches prefix {prefix:?}: not found"),
+            0 => Err(crate::EngineError::NotFound(format!(
+                "no visible commit matches prefix {prefix:?}"
+            ))
+            .into()),
             1 => Ok(matches.pop().unwrap()),
             n => anyhow::bail!("prefix {prefix:?} is ambiguous: {n} visible commits match"),
         }
@@ -158,7 +161,7 @@ impl RepoEngine {
         let workspace = self
             .workspaces
             .get_mut(ws)
-            .ok_or_else(|| anyhow::anyhow!("no workspace {ws}"))?;
+            .ok_or_else(|| crate::EngineError::NotFound(format!("no workspace {ws}")))?;
         let mut locked_ws = workspace.start_working_copy_mutation().await?;
         locked_ws.locked_wc().reset(&wc_commit).await?;
         locked_ws.finish(self.repo.op_id().clone()).await?;
@@ -224,7 +227,7 @@ impl RepoEngine {
         let resolved = value
             .into_resolved()
             .map_err(|_| anyhow::anyhow!("path is conflicted: {path}"))?
-            .ok_or_else(|| anyhow::anyhow!("not found: {path}"))?;
+            .ok_or_else(|| crate::EngineError::NotFound(format!("not found: {path}")))?;
         match resolved {
             jj_lib::backend::TreeValue::File { id, .. } => {
                 let mut reader = self.repo.store().read_file(repo_path, &id).await?;
@@ -240,12 +243,12 @@ impl RepoEngine {
         let workspace = self
             .workspaces
             .get(ws)
-            .ok_or_else(|| anyhow::anyhow!("no workspace {ws}"))?;
+            .ok_or_else(|| crate::EngineError::NotFound(format!("no workspace {ws}")))?;
         let id = self
             .repo
             .view()
             .get_wc_commit_id(workspace.workspace_name())
-            .ok_or_else(|| anyhow::anyhow!("no working-copy commit for {ws}"))?;
+            .ok_or_else(|| crate::EngineError::NotFound(format!("no working-copy commit for {ws}")))?;
         Ok(self.repo.store().get_commit(id)?)
     }
 }

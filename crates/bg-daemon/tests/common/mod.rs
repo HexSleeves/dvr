@@ -109,6 +109,31 @@ async fn try_req(
     Ok((status, bytes))
 }
 
+/// Sends an arbitrary request body and returns the unparsed response. Used to
+/// exercise framework-level rejections that cannot be expressed as a valid
+/// serde_json::Value.
+#[allow(dead_code)] // each test binary compiles its own common module
+pub async fn req_bytes(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    content_type: &str,
+    body: &[u8],
+) -> (StatusCode, Vec<u8>) {
+    let client: Client<UnixConnector, Full<Bytes>> = Client::unix();
+    let uri: hyper::Uri = Uri::new(socket, path).into();
+    let req = Request::builder()
+        .method(Method::from_bytes(method.as_bytes()).unwrap())
+        .uri(uri)
+        .header("content-type", content_type)
+        .body(Full::new(Bytes::copy_from_slice(body)))
+        .unwrap();
+    let res = client.request(req).await.expect("request failed");
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, bytes.to_vec())
+}
+
 /// Sends a request over the daemon's unix socket and parses the JSON reply.
 pub async fn req_json(
     socket: &Path,

@@ -30,6 +30,27 @@ async fn unknown_repo_is_404_with_api_error() {
 }
 
 #[tokio::test]
+async fn framework_rejections_are_structured_api_errors() {
+    let d = common::spawn_daemon().await;
+    let cases = [
+        common::req_bytes(&d.socket, "POST", "/repos", "application/json", b"{").await,
+        common::req_raw(&d.socket, "/repos/nope/file?rev=@").await,
+        common::req_raw(&d.socket, "/not-a-route").await,
+        common::req_bytes(&d.socket, "PUT", "/health", "application/json", b"{}").await,
+        common::req_bytes(&d.socket, "POST", "/repos", "text/plain", b"{}").await,
+    ];
+    for (status, body) in cases {
+        assert!(status.is_client_error(), "{status}: {}", String::from_utf8_lossy(&body));
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|err| {
+            panic!("framework rejection was not ApiError JSON ({status}): {err}: {:?}", String::from_utf8_lossy(&body))
+        });
+        assert!(error["code"].is_string(), "{status}: {error}");
+        assert!(error["message"].is_string(), "{status}: {error}");
+        assert!(error.get("hint").is_some(), "{status}: {error}");
+    }
+}
+
+#[tokio::test]
 async fn health_reports_version() {
     let d = common::spawn_daemon().await;
     let (st, v) = common::req_json(&d.socket, "GET", "/health", None).await;

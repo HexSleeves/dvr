@@ -1,5 +1,7 @@
+use axum::body::to_bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -23,6 +25,48 @@ pub fn router(state: DaemonState) -> Router {
         .route("/repos/{id}/push", post(push))
         .route("/repos/{id}/file", get(file))
         .with_state(state)
+        .layer(middleware::map_response(structure_framework_errors))
+}
+
+/// Axum extractor, method, and fallback rejections bypass handler return
+/// types. Normalize those framework responses so every daemon API error still
+/// honors the structured `ApiError` contract. Handler-produced JSON errors
+/// pass through unchanged.
+async fn structure_framework_errors(response: Response) -> Response {
+    let status = response.status();
+    if !status.is_client_error() && !status.is_server_error() {
+        return response;
+    }
+    let is_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"));
+    if is_json {
+        return response;
+    }
+
+    let allow = response.headers().get(header::ALLOW).cloned();
+    let (_, body) = response.into_parts();
+    let bytes = to_bytes(body, 64 * 1024).await.unwrap_or_default();
+    let body_message = String::from_utf8_lossy(&bytes).trim().to_string();
+    let message = if body_message.is_empty() {
+        status.canonical_reason().unwrap_or("request failed").to_string()
+    } else {
+        body_message
+    };
+    let code = if status == StatusCode::NOT_FOUND {
+        ErrorCode::NotFound
+    } else if status.is_client_error() {
+        ErrorCode::InvalidRequest
+    } else {
+        ErrorCode::Internal
+    };
+    let mut structured = (status, Json(ApiError { code, message, hint: None })).into_response();
+    if let Some(allow) = allow {
+        structured.headers_mut().insert(header::ALLOW, allow);
+    }
+    structured
 }
 
 /// An `ApiError` plus the HTTP status it travels with. Every handler error

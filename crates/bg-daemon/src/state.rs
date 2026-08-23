@@ -32,6 +32,21 @@ struct RepoHandle {
     engine: Arc<Mutex<RepoEngine>>,
 }
 
+/// Weak handle for background tasks (the watcher event task). Holding the
+/// state strongly there would create a cycle — `Inner` owns the
+/// `WatcherHandle`, whose event task would own `Inner` — so a daemon whose
+/// server task ended (aborted in tests) would keep watching and snapshotting
+/// forever. Weak breaks the cycle: when the last strong handle drops, the
+/// debouncer drops with `Inner` and the event task exits.
+#[derive(Clone)]
+pub(crate) struct WeakDaemonState(std::sync::Weak<Inner>);
+
+impl WeakDaemonState {
+    pub(crate) fn upgrade(&self) -> Option<DaemonState> {
+        self.0.upgrade().map(|inner| DaemonState { inner })
+    }
+}
+
 /// Register failures, split so routes can map them to HTTP statuses without
 /// inspecting message strings.
 #[derive(Debug, thiserror::Error)]
@@ -178,6 +193,10 @@ impl DaemonState {
     /// it alive for the daemon's lifetime.
     pub fn set_watcher(&self, watcher: crate::watcher::WatcherHandle) {
         *self.inner.watcher.lock().unwrap() = Some(watcher);
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakDaemonState {
+        WeakDaemonState(Arc::downgrade(&self.inner))
     }
 
     /// Looks up a repo by id, or by any absolute path inside a registered

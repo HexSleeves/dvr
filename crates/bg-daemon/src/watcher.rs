@@ -59,6 +59,12 @@ pub fn spawn(
     }
     let roots: Roots = Arc::new(RwLock::new(initial));
 
+    // Weak, not strong: the state owns this watcher, so a strong clone here
+    // would be a cycle that keeps a dead daemon's watcher snapshotting forever
+    // (see `WeakDaemonState`). When the daemon drops, the debouncer (and its
+    // callback holding `tx`) drops too, `recv` returns `None`, and this task
+    // exits.
+    let weak = state.downgrade();
     let task_roots = roots.clone();
     tokio::spawn(async move {
         while let Some(res) = rx.recv().await {
@@ -99,6 +105,9 @@ pub fn spawn(
                 }
             }
 
+            // Upgrade per batch and drop the strong handle before the next
+            // `recv` — an in-flight batch racing daemon shutdown is skipped.
+            let Some(state) = weak.upgrade() else { break };
             for id in dirty {
                 snapshot_repo(&state, &id).await;
             }

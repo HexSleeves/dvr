@@ -68,4 +68,18 @@ fn git_push_appears_only_in_push_rs() {
     for f in files.lines() {
         assert!(f.ends_with("push.rs"), "git push leaked outside push.rs: {f}");
     }
+    // Non-vacuity: push.rs itself must contain the literal, or this test is
+    // scanning the wrong place and proving nothing.
+    assert!(files.lines().any(|f| f.ends_with("push.rs")), "guardrail grep went vacuous");
+}
+
+#[tokio::test]
+async fn push_rejects_glob_bookmark() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let (mut e, remote) = setup(dir.path()).await;
+    e.describe("default", None, "feat: x").await.unwrap();
+    let req = PushRequest { change_id: None, remote: "origin".into(), bookmark: "*".into(), create: true };
+    let err = e.push("default", &req).await.unwrap_err();
+    assert!(err.to_string().contains("invalid bookmark"), "got: {err:#}");
+    assert!(remote_heads(&remote).is_empty(), "a glob bookmark must never reach git push");
 }

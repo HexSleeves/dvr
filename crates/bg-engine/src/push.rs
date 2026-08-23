@@ -120,13 +120,16 @@ impl crate::RepoEngine {
 }
 
 /// Rejects names that could change what the git subprocess does: empty or
-/// whitespace-bearing names, option-shaped names (`-...`), and refspec
-/// separators (`:`).
+/// whitespace-bearing names, option-shaped names (`-...`), refspec separators
+/// (`:`), and glob characters (`*?[` — a `*` bookmark would build the
+/// wildcard refspec `refs/heads/*:refs/heads/*` and push everything; the
+/// never-push-everything guarantee must not rest on jj-lib's export-time
+/// refname validation).
 fn validate_name(what: &str, value: &str) -> anyhow::Result<()> {
     let bad = value.is_empty()
         || value.chars().any(char::is_whitespace)
         || value.starts_with('-')
-        || value.contains(':');
+        || value.chars().any(|c| matches!(c, ':' | '*' | '?' | '['));
     if bad {
         return Err(EngineError::Invalid(format!("invalid {what} name: {value:?}")).into());
     }

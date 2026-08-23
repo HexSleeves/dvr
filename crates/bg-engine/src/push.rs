@@ -35,6 +35,15 @@ impl crate::RepoEngine {
         validate_name("remote", &req.remote)?;
         validate_name("bookmark", &req.bookmark)?;
 
+        // The watcher is debounced, so an edit followed immediately by a
+        // default-target push may not be in the stored working-copy commit
+        // yet. Snapshot while the daemon still holds this repo's engine lock
+        // before selecting the commit to publish. An explicit change id stays
+        // exact and does not absorb unrelated workspace edits.
+        if req.change_id.is_none() {
+            self.snapshot(ws).await?;
+        }
+
         // Validates `ws` up front even for change_id-targeted pushes, so a bad
         // workspace name can never fail AFTER the bookmark transaction.
         let wc = self.wc_commit(ws)?;

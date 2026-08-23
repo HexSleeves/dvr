@@ -56,6 +56,36 @@ async fn push_with_create_lands_exactly_the_named_branch() {
     assert_eq!(heads.lines().count(), 1, "must push ONLY the named bookmark: {heads}");
 }
 
+#[tokio::test]
+async fn push_snapshots_edits_before_selecting_working_copy() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let (mut e, remote) = setup(dir.path()).await;
+    e.describe("default", None, "feat: fresh push").await.unwrap();
+    // No explicit snapshot: an immediate push must not race the watcher's
+    // debounce window and publish the previous tree.
+    std::fs::write(dir.path().join("repo/late.txt"), "included").unwrap();
+    let req = PushRequest {
+        change_id: None,
+        remote: "origin".into(),
+        bookmark: "feat/fresh".into(),
+        create: true,
+    };
+    e.push("default", &req).await.unwrap();
+
+    let out = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&remote)
+        .args(["show", "refs/heads/feat/fresh:late.txt"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "immediate push omitted the unsnapshotted edit: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout, b"included");
+}
+
 #[test]
 fn git_push_appears_only_in_push_rs() {
     // Guardrail enforcement: every production git subprocess site is

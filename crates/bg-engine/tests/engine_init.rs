@@ -25,3 +25,31 @@ async fn open_or_init_is_idempotent() {
     let engine2 = RepoEngine::open_or_init(dir.path(), settings).await.unwrap();
     assert!(engine2.wc_commit("default").is_ok());
 }
+
+/// Registering a repo must not dirty its `git status`: jj-cli hides the `.jj`
+/// dir from git in colocated repos by writing `.jj/.gitignore` = "/*\n"
+/// (cli/src/commands/git/mod.rs `maybe_add_gitignore`); we do the same. The
+/// repo-local alternative (editing the USER'S .gitignore) is not ours to do.
+#[tokio::test]
+async fn init_hides_jj_dir_from_git_status() {
+    let dir = tempfile::tempdir().unwrap();
+    common::fixture_git_repo(dir.path());
+    let settings = make_settings("Test", "test@example.com").unwrap();
+    let _engine = RepoEngine::open_or_init(dir.path(), settings).await.unwrap();
+
+    let gitignore = std::fs::read_to_string(dir.path().join(".jj/.gitignore"))
+        .expect("init must write .jj/.gitignore");
+    assert_eq!(gitignore, "/*\n");
+
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "",
+        "git status must stay clean after open_or_init"
+    );
+}

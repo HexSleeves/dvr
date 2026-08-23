@@ -44,6 +44,16 @@ impl RepoEngine {
             (workspace, repo)
         };
 
+        // Hide `.jj` from git so registering a repo never dirties its `git
+        // status` — same as jj-cli's `maybe_add_gitignore` for colocated
+        // repos (cli/src/commands/git/mod.rs writes "/*\n"). If-absent, not
+        // just on fresh init: it also heals repos initialized before this
+        // was written, without clobbering a user-edited file.
+        let jj_gitignore = root.join(".jj").join(".gitignore");
+        if !jj_gitignore.exists() {
+            std::fs::write(&jj_gitignore, "/*\n")?;
+        }
+
         let mut workspaces = HashMap::new();
         // Rehydrate the other workspaces of this repo (created by
         // add_workspace in an earlier daemon life) from the view + the repo
@@ -198,28 +208,36 @@ impl RepoEngine {
     fn visible_commits(&self) -> anyhow::Result<Vec<Commit>> {
         let view = self.repo.view();
         // Depth-first from the visible heads (+ wc commits), emitting each
-        // commit on DFS exit; the reversed post-order is a topological order
-        // (every commit before all of its ancestors).
-        let mut stack: Vec<(CommitId, bool)> = view
+        // commit on DFS exit (`Emit` carries the commit fetched on entry);
+        // the reversed post-order is a topological order (every commit
+        // before all of its ancestors).
+        enum Step {
+            Visit(CommitId),
+            Emit(Commit),
+        }
+        let mut stack: Vec<Step> = view
             .heads()
             .iter()
             .cloned()
             .chain(view.wc_commit_ids().values().cloned())
-            .map(|id| (id, false))
+            .map(Step::Visit)
             .collect();
         let mut seen: HashSet<CommitId> = HashSet::new();
         let mut commits = Vec::new();
-        while let Some((id, exiting)) = stack.pop() {
-            if exiting {
-                commits.push(self.repo.store().get_commit(&id)?);
-                continue;
-            }
+        while let Some(step) = stack.pop() {
+            let id = match step {
+                Step::Emit(commit) => {
+                    commits.push(commit);
+                    continue;
+                }
+                Step::Visit(id) => id,
+            };
             if !seen.insert(id.clone()) {
                 continue;
             }
             let commit = self.repo.store().get_commit(&id)?;
-            stack.push((id, true));
-            stack.extend(commit.parent_ids().iter().cloned().map(|p| (p, false)));
+            stack.push(Step::Emit(commit.clone()));
+            stack.extend(commit.parent_ids().iter().cloned().map(Step::Visit));
         }
         commits.reverse();
         // Newest first — but STABLE, so commits sharing a committer second

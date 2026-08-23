@@ -45,6 +45,33 @@ async fn two_workspaces_on_same_change_is_allowed() {
 }
 
 #[tokio::test]
+async fn workspaces_survive_reopen() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let root = dir.path().join("main");
+    std::fs::create_dir(&root).unwrap();
+    common::fixture_git_repo(&root);
+    let mut engine = RepoEngine::open_or_init(&root, make_settings("T", "t@t").unwrap()).await.unwrap();
+    engine.snapshot("default").await.unwrap();
+    engine.add_workspace("agent1", &dir.path().join("agent1"), None).await.unwrap();
+    drop(engine);
+
+    // Rehydration: a fresh open must see the extra workspace (crash safety —
+    // the daemon reopens engines from repos.json after a restart).
+    let mut engine = RepoEngine::open_or_init(&root, make_settings("T", "t@t").unwrap()).await.unwrap();
+    let names: Vec<String> = engine.list_workspaces().into_iter().map(|w| w.name).collect();
+    assert_eq!(names, vec!["agent1", "default"]);
+    std::fs::write(dir.path().join("agent1/reopen.txt"), "hi").unwrap();
+    assert!(engine.snapshot("agent1").await.unwrap(), "snapshot must work in the rehydrated clone");
+    drop(engine);
+
+    // A workspace whose directory vanished is skipped (warned), not fatal.
+    std::fs::remove_dir_all(dir.path().join("agent1")).unwrap();
+    let engine = RepoEngine::open_or_init(&root, make_settings("T", "t@t").unwrap()).await.unwrap();
+    let names: Vec<String> = engine.list_workspaces().into_iter().map(|w| w.name).collect();
+    assert_eq!(names, vec!["default"]);
+}
+
+#[tokio::test]
 async fn add_workspace_rejects_bad_names_and_existing_dest() {
     let dir = tempfile::tempdir_in("/tmp").unwrap();
     let root = dir.path().join("main");

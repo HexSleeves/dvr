@@ -180,6 +180,17 @@ async fn workspace_new(
     Json(req): Json<NewWorkspaceRequest>,
 ) -> Result<Json<WorkspaceInfo>, ApiFailure> {
     let (info, handle) = st.resolve(&id).await.ok_or_else(|| ApiFailure::unknown_repo(&id))?;
+    // The engine validates existence/nesting lexically, so the daemon only
+    // accepts absolute, `..`-free destinations.
+    if let Some(dest) = &req.dest {
+        let laden = dest.components().any(|c| c == std::path::Component::ParentDir);
+        if !dest.is_absolute() || laden {
+            return Err(ApiFailure::invalid_request(format!(
+                "dest must be an absolute path without ..: {}",
+                dest.display()
+            )));
+        }
+    }
     let dest = match req.dest {
         Some(dest) => dest,
         None => {

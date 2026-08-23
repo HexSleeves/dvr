@@ -7,10 +7,15 @@
 //! and one snapshot reconciles clone-vs-parent drift — the clone's files
 //! become the new change's content, which is exactly the intended semantic.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use jj_lib::commit::Commit;
-use jj_lib::default_backend_factories::default_working_copy_factory;
+use jj_lib::default_backend_factories::{
+    default_working_copy_factories, default_working_copy_factory,
+};
+use jj_lib::repo::ReadonlyRepo;
+use jj_lib::settings::UserSettings;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::Repo as _;
 use jj_lib::ref_name::{WorkspaceName, WorkspaceNameBuf};
@@ -35,6 +40,11 @@ impl crate::RepoEngine {
         self.validate_new_workspace_name(name)?;
         self.validate_dest(dest)?;
 
+        // First parent only (per the plan), unlike jj-cli `workspace add`
+        // which merges ALL parents of the current wc commit. Known
+        // limitation: if default's wc commit is ever a merge, the new
+        // workspace starts from the first parent and the reconcile snapshot
+        // absorbs the second parent's content into the new change.
         let parent = match at_change {
             Some(prefix) => self.resolve_change(prefix)?,
             None => {
@@ -228,24 +238,127 @@ impl crate::RepoEngine {
     }
 }
 
-/// Copies `src` to `dest` via clonefile(2) (`cp -Rc`, CoW on APFS — off-APFS
-/// or cross-volume this errors, which is fine for v1), then strips the
-/// clone's `.jj` so it never impersonates the source workspace.
-fn clonefile_dir(src: &Path, dest: &Path) -> anyhow::Result<()> {
-    let status = std::process::Command::new("/bin/cp")
-        .arg("-Rc")
-        .arg(src)
-        .arg(dest)
-        .status()?;
-    anyhow::ensure!(
-        status.success(),
-        "cp -Rc {} {} failed (clonefile needs src and dest on the same APFS volume)",
-        src.display(),
-        dest.display()
-    );
-    let jj_dir = dest.join(".jj");
-    if jj_dir.exists() {
-        std::fs::remove_dir_all(&jj_dir)?;
+/// Rehydrates the non-default workspaces of an existing repo: for every name
+/// in the view's working-copy commits, look up its root in the repo's
+/// workspace store and load its working copy. A workspace whose store entry
+/// or directory vanished (or no longer loads) is skipped with a warning — its
+/// view entry is left alone, never implicitly forgotten. Called by
+/// `open_or_init` so daemon restarts keep watching/snapshotting agent
+/// workspaces (spec crash-safety).
+pub(crate) fn load_extra_workspaces(
+    settings: &UserSettings,
+    primary: &Workspace,
+    repo: &ReadonlyRepo,
+    workspaces: &mut HashMap<String, Workspace>,
+) -> anyhow::Result<()> {
+    let store = SimpleWorkspaceStore::load(primary.repo_path())?;
+    for name in repo.view().wc_commit_ids().keys() {
+        if name.as_str() == primary.workspace_name().as_str() {
+            continue;
+        }
+        let root = match store.get_workspace_path(name) {
+            // The store records paths relative to the repo dir (`.jj/repo`)
+            // and returns them verbatim — the caller must rejoin.
+            Ok(Some(root)) if root.is_relative() => primary.repo_path().join(root),
+            Ok(Some(root)) => root,
+            Ok(None) => {
+                tracing::warn!(workspace = name.as_str(), "skipping workspace: not in workspace store");
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!(workspace = name.as_str(), "skipping workspace: workspace store: {err}");
+                continue;
+            }
+        };
+        if !root.is_dir() {
+            tracing::warn!(workspace = name.as_str(), root = %root.display(),
+                "skipping workspace: directory vanished");
+            continue;
+        }
+        match load_shared_store_workspace(settings, primary, &root) {
+            Ok(ws) => {
+                workspaces.insert(name.as_str().to_string(), ws);
+            }
+            Err(err) => {
+                tracing::warn!(workspace = name.as_str(), root = %root.display(),
+                    "skipping workspace: failed to load: {err:#}");
+            }
+        }
     }
     Ok(())
+}
+
+/// Loads the workspace at `root` reusing the PRIMARY workspace's `RepoLoader`
+/// (and thus its `Store` Arc). `Workspace::load` would build a fresh
+/// `RepoLoader`/`Store` per workspace, and jj-lib asserts store *pointer*
+/// identity when trees from one store meet a `CommitBuilder` of another
+/// (`commit_builder.rs` `set_tree`: `Arc::ptr_eq`) — a snapshot in a
+/// rehydrated workspace would panic. Mirrors `DefaultWorkspaceLoader::load`
+/// minus the `RepoLoader::init_from_file_system`.
+fn load_shared_store_workspace(
+    settings: &UserSettings,
+    primary: &Workspace,
+    root: &Path,
+) -> anyhow::Result<Workspace> {
+    let state_path = root.join(".jj").join("working_copy");
+    let wc_type = std::fs::read_to_string(state_path.join("type"))?;
+    let factories = default_working_copy_factories();
+    let factory = factories
+        .get(wc_type.trim())
+        .ok_or_else(|| anyhow::anyhow!("unsupported working copy type {:?}", wc_type.trim()))?;
+    let working_copy = factory.load_working_copy(
+        primary.repo_loader().store().clone(),
+        root.to_path_buf(),
+        state_path,
+        settings,
+    )?;
+    Ok(Workspace::new(
+        root,
+        primary.repo_path().to_path_buf(),
+        working_copy,
+        primary.repo_loader().clone(),
+    )?)
+}
+
+/// Copies `src` to `dest` via clonefile(2) (`cp -Rc`, CoW on APFS — off-APFS
+/// or cross-volume this errors, which is fine for v1), then strips the
+/// clone's `.jj` so it never impersonates the source workspace. The clone's
+/// `.git` is deliberately KEPT (controller ruling, spec §5): plain git and
+/// editors keep working inside workspaces — unlike jj-cli's no-.git secondary
+/// workspaces — at the cost of the copy being stale until a git export lands
+/// in workspaces. Any failure removes the partial `dest` so a retry doesn't
+/// hit a misleading "destination exists".
+fn clonefile_dir(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    let cleanup_on_err = |err: anyhow::Error| -> anyhow::Error {
+        // validate_dest guaranteed dest did not exist, so the partial copy is
+        // ours to delete. Best-effort: a leftover just re-triggers
+        // "destination exists" on retry.
+        match std::fs::remove_dir_all(dest) {
+            Ok(()) => err,
+            Err(rm_err) if rm_err.kind() == std::io::ErrorKind::NotFound => err,
+            Err(rm_err) => err.context(format!(
+                "cleanup of partial clone {} also failed: {rm_err}",
+                dest.display()
+            )),
+        }
+    };
+    let run = || -> anyhow::Result<()> {
+        let status = std::process::Command::new("/bin/cp")
+            .arg("-Rc")
+            .arg(src)
+            .arg(dest)
+            .status()?;
+        anyhow::ensure!(
+            status.success(),
+            "cp -Rc {} {} failed (clonefile needs src and dest on the same APFS volume)",
+            src.display(),
+            dest.display()
+        );
+        let jj_dir = dest.join(".jj");
+        if jj_dir.exists() {
+            std::fs::remove_dir_all(&jj_dir)?;
+        }
+        Ok(())
+    };
+    run().map_err(cleanup_on_err)
 }

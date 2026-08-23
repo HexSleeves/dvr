@@ -46,6 +46,10 @@ impl RepoEngine {
         };
 
         let mut workspaces = HashMap::new();
+        // Rehydrate the other workspaces of this repo (created by
+        // add_workspace in an earlier daemon life) from the view + the repo
+        // workspace store, so restarts keep watching/snapshotting them.
+        crate::workspace_ops::load_extra_workspaces(&settings, &workspace, &repo, &mut workspaces)?;
         workspaces.insert("default".to_string(), workspace);
 
         Ok(Self { root: root.to_path_buf(), settings, repo, workspaces })

@@ -58,19 +58,47 @@ async fn push_with_create_lands_exactly_the_named_branch() {
 
 #[test]
 fn git_push_appears_only_in_push_rs() {
-    // Guardrail enforcement: the string "push" as a git subcommand exists only in push.rs.
-    let out = std::process::Command::new("grep")
-        .args(["-rn", "--include=*.rs", "-l", "\"push\""])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
-        .output()
-        .unwrap();
-    let files = String::from_utf8(out.stdout).unwrap();
-    for f in files.lines() {
-        assert!(f.ends_with("push.rs"), "git push leaked outside push.rs: {f}");
+    // Guardrail enforcement: every production git subprocess site is
+    // explicit. Any new site fails until a reviewer verifies and allowlists
+    // it; push.rs is the only site allowed to issue arbitrary git commands.
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut grep = std::process::Command::new("grep");
+    grep.args(["-Rn", "--include=*.rs", "-F", "Command::new(\"git\")"]);
+    for entry in std::fs::read_dir(workspace.join("crates")).unwrap() {
+        let src = entry.unwrap().path().join("src");
+        if src.is_dir() {
+            grep.arg(src);
+        }
     }
-    // Non-vacuity: push.rs itself must contain the literal, or this test is
-    // scanning the wrong place and proving nothing.
-    assert!(files.lines().any(|f| f.ends_with("push.rs")), "guardrail grep went vacuous");
+    let out = grep.output().unwrap();
+    assert!(out.status.success(), "guardrail grep failed: {}", String::from_utf8_lossy(&out.stderr));
+    let files = String::from_utf8(out.stdout).unwrap();
+    let allowlist = [
+        (
+            "crates/bg-daemon/src/state.rs",
+            "Command::new(\"git\").args([\"config\", key])",
+        ),
+        (
+            "crates/bg-engine/src/push.rs",
+            "Command::new(\"git\").arg(\"-C\").arg(root).args(args)",
+        ),
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut hit_count = 0;
+    for hit in files.lines() {
+        hit_count += 1;
+        let (path, source) = hit.split_once(':').expect("grep output must contain path and source");
+        let relative = std::path::Path::new(path).strip_prefix(&workspace).unwrap();
+        let relative = relative.to_string_lossy();
+        let allowed = allowlist
+            .iter()
+            .any(|(allowed_path, fragment)| relative == *allowed_path && source.contains(fragment));
+        assert!(allowed, "unreviewed production git subprocess site: {relative}:{source}");
+        seen.insert(relative.into_owned());
+    }
+    assert_eq!(hit_count, allowlist.len(), "guardrail allowlist and grep hits diverged: {files}");
+    assert_eq!(seen.len(), allowlist.len(), "guardrail allowlist and grep hits diverged: {files}");
+    assert!(seen.contains("crates/bg-engine/src/push.rs"), "guardrail grep went vacuous");
 }
 
 #[tokio::test]

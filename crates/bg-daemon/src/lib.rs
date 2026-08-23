@@ -33,6 +33,9 @@ pub async fn run() -> anyhow::Result<()> {
 /// mutating the process environment (parallel-safe).
 pub async fn run_with_dir(dir: PathBuf) -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir)?;
+    // Pidfile so out-of-process supervisors (and the CLI e2e tests) can find
+    // and stop this daemon. Best-effort: in-process test daemons share a pid.
+    let _ = std::fs::write(dir.join("bgd.pid"), std::process::id().to_string());
     let state = state::DaemonState::load(&dir).await?;
     // Crash-safety: re-scan every registered repo BEFORE serving, so edits
     // made while the daemon was down land in the oplog (spec: error handling).

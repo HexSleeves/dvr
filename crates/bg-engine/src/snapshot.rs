@@ -4,11 +4,11 @@ use jj_lib::matchers::{EverythingMatcher, NothingMatcher};
 use jj_lib::object_id::ObjectId;
 use jj_lib::working_copy::SnapshotOptions;
 
-/// 12-char lowercase-hex-ish rendering of a commit's change id. `ChangeId`'s
-/// `hex()` already uses jj's "reverse hex" alphabet (z-k), matching what the
-/// `jj` CLI displays; we just truncate it. Opaque token to clients either way.
+/// 12-char rendering of a commit's change id in jj's "reverse hex" alphabet
+/// (z-k), matching what the `jj` CLI displays. (`ObjectId::hex()` would be
+/// plain forward hex; `ChangeId::reverse_hex()` is the CLI-visible form.)
 pub(crate) fn short_change_id(commit: &Commit) -> String {
-    commit.change_id().hex().chars().take(12).collect()
+    commit.change_id().reverse_hex().chars().take(12).collect()
 }
 
 /// 12-char hex prefix of a commit's commit id.

@@ -1,6 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use jj_lib::backend::CommitId;
+use jj_lib::commit::Commit;
 
 use jj_lib::default_backend_factories::{default_backend_factories, default_working_copy_factories};
 use jj_lib::git::{GitImportOptions, import_refs};
@@ -85,6 +88,127 @@ impl RepoEngine {
             },
             workspaces,
         })
+    }
+
+    /// Returns up to `limit` visible commits, newest-first, with working-copy
+    /// commits flagged and local bookmark names attached.
+    pub fn log(&self, limit: usize) -> anyhow::Result<Vec<bg_proto::LogEntry>> {
+        let commits = self.visible_commits()?;
+        Ok(commits.iter().take(limit).map(|c| self.log_entry_for(c)).collect())
+    }
+
+    /// Resolves a change-id (reverse-hex, as displayed) or commit-id (hex)
+    /// prefix against the visible commits. Errors distinguish "not found"
+    /// from "ambiguous".
+    pub fn resolve_change(&self, prefix: &str) -> anyhow::Result<Commit> {
+        anyhow::ensure!(!prefix.is_empty(), "empty change/commit id prefix");
+        let mut matches: Vec<Commit> = self
+            .visible_commits()?
+            .into_iter()
+            .filter(|c| {
+                c.change_id().reverse_hex().starts_with(prefix) || c.id().hex().starts_with(prefix)
+            })
+            .collect();
+        match matches.len() {
+            0 => anyhow::bail!("no visible commit matches prefix {prefix:?}: not found"),
+            1 => Ok(matches.pop().unwrap()),
+            n => anyhow::bail!("prefix {prefix:?} is ambiguous: {n} visible commits match"),
+        }
+    }
+
+    /// Rewrites the description of the target commit (default: the workspace's
+    /// working-copy commit), then re-syncs the on-disk working-copy state.
+    /// Mirrors jj-cli `describe` (`cli/src/commands/describe.rs`) followed by
+    /// `update_working_copy` (`cli/src/cli_util.rs`).
+    pub async fn describe(
+        &mut self,
+        ws: &str,
+        change: Option<&str>,
+        message: &str,
+    ) -> anyhow::Result<bg_proto::LogEntry> {
+        let target = match change {
+            Some(prefix) => self.resolve_change(prefix)?,
+            None => self.wc_commit(ws)?,
+        };
+        let mut tx = self.repo.start_transaction();
+        tx.repo_mut()
+            .rewrite_commit(&target)
+            .set_description(message)
+            .write()
+            .await?;
+        // write() leaves the commit registered as a rewrite; commit() asserts
+        // !has_rewrites(). rebase_descendants also repoints wc commits at the
+        // rewritten target (MutableRepo::update_wc_commits).
+        tx.repo_mut().rebase_descendants().await?;
+        self.repo = tx.commit(format!("describe {}", &target.id().hex()[..12])).await?;
+        self.sync_wc_after_tx(ws).await?;
+        // The change id is stable across the rewrite, so re-resolve it (full
+        // reverse-hex form, immune to prefix collisions) in the new repo state
+        // and reuse the log-entry builder.
+        let rewritten = self.resolve_change(&target.change_id().reverse_hex())?;
+        Ok(self.log_entry_for(&rewritten))
+    }
+
+    /// After any transaction that rewrote a working-copy commit: repoint the
+    /// on-disk working-copy state at the (possibly rewritten) wc commit and
+    /// record the new operation id. State-only (`reset` does not touch files);
+    /// mirrors jj-cli `update_working_copy` (`cli/src/cli_util.rs`).
+    pub(crate) async fn sync_wc_after_tx(&mut self, ws: &str) -> anyhow::Result<()> {
+        let wc_commit = self.wc_commit(ws)?;
+        let workspace = self
+            .workspaces
+            .get_mut(ws)
+            .ok_or_else(|| anyhow::anyhow!("no workspace {ws}"))?;
+        let mut locked_ws = workspace.start_working_copy_mutation().await?;
+        locked_ws.locked_wc().reset(&wc_commit).await?;
+        locked_ws.finish(self.repo.op_id().clone()).await?;
+        Ok(())
+    }
+
+    /// Maps a commit to its `bg_proto::LogEntry`, shared by `log` and
+    /// `describe`.
+    pub(crate) fn log_entry_for(&self, commit: &Commit) -> bg_proto::LogEntry {
+        let view = self.repo.view();
+        let bookmarks = view
+            .local_bookmarks_for_commit(commit.id())
+            .map(|(name, _)| name.as_str().to_string())
+            .collect();
+        bg_proto::LogEntry {
+            change_id: short_change_id(commit),
+            commit_id: short_commit_id(commit),
+            description: commit.description().to_string(),
+            author_name: commit.author().name.clone(),
+            author_email: commit.author().email.clone(),
+            timestamp_ms: commit.committer().timestamp.timestamp.0.max(0) as u64,
+            bookmarks,
+            is_working_copy: view.wc_commit_ids().values().any(|id| id == commit.id()),
+        }
+    }
+
+    /// All visible commits (ancestors of the view's heads and working-copy
+    /// commits, root included), sorted newest-first by committer timestamp.
+    /// jj-lib 0.44's `Revset` trait is stream-only, so this walks the store
+    /// directly to keep `log`/`resolve_change` synchronous.
+    fn visible_commits(&self) -> anyhow::Result<Vec<Commit>> {
+        let view = self.repo.view();
+        let mut queue: Vec<CommitId> = view.heads().iter().cloned().collect();
+        queue.extend(view.wc_commit_ids().values().cloned());
+        let mut seen: HashSet<CommitId> = HashSet::new();
+        let mut commits = Vec::new();
+        while let Some(id) = queue.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let commit = self.repo.store().get_commit(&id)?;
+            queue.extend(commit.parent_ids().iter().cloned());
+            commits.push(commit);
+        }
+        commits.sort_by(|a, b| {
+            let ta = a.committer().timestamp.timestamp.0;
+            let tb = b.committer().timestamp.timestamp.0;
+            tb.cmp(&ta).then_with(|| a.id().cmp(b.id()))
+        });
+        Ok(commits)
     }
 
     pub fn wc_commit(&self, ws: &str) -> anyhow::Result<jj_lib::commit::Commit> {

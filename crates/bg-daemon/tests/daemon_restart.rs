@@ -42,33 +42,15 @@ async fn changes_made_while_daemon_down_are_snapshotted_on_startup() {
 }
 
 #[tokio::test]
-async fn broken_repo_does_not_prevent_daemon_startup() {
-    let state = common::fresh_state_dir();
-    let healthy_repo = common::fixture_repo("/tmp", "bgtest-restart-healthy");
-    let broken_repo = common::fixture_repo("/tmp", "bgtest-restart-broken");
+async fn startup_scan_surfaces_repo_snapshot_failures() {
+    let state_dir = common::fresh_state_dir();
+    let repo_dir = common::fixture_repo("/tmp", "bgtest-startup-scan-failure");
+    let state = bg_daemon::state::DaemonState::load(state_dir.path()).await.unwrap();
+    state.register(std::path::Path::new(&repo_dir)).await.unwrap();
 
-    // First daemon: register both repos.
-    {
-        let d = common::spawn_daemon_in(state.path()).await;
-        let (st, _) =
-            common::req_json(&d.socket, "POST", "/repos", Some(serde_json::json!({"path": healthy_repo}))).await;
-        assert_eq!(st, 200);
-        let (st, _) =
-            common::req_json(&d.socket, "POST", "/repos", Some(serde_json::json!({"path": broken_repo}))).await;
-        assert_eq!(st, 200);
-        d.shutdown().await;
-    }
-
-    // Daemon is DOWN; damage one repo's working copy and edit the healthy repo.
-    std::fs::remove_dir_all(std::path::Path::new(&broken_repo).join(".jj/working_copy")).unwrap();
-    std::fs::write(std::path::Path::new(&healthy_repo).join("healthy.txt"), "still works").unwrap();
-
-    // Restart: the daemon must start, /health must answer, and the healthy repo
-    // must have snapshotted its offline edits (the real daemon-level guarantee).
-    let d = common::spawn_daemon_in(state.path()).await;
-    let (st, body) =
-        common::req_raw(&d.socket, "/repos/bgtest-restart-healthy/file?rev=@&path=healthy.txt").await;
-    assert_eq!(st, 200, "healthy repo must be snapshotted and serve requests: {}",
-        String::from_utf8_lossy(&body));
-    assert_eq!(body, b"still works");
+    // Force the same failure startup can encounter after loading its
+    // registry. Readiness must not silently continue after this scan fails.
+    std::fs::remove_dir_all(std::path::Path::new(&repo_dir).join(".jj/working_copy")).unwrap();
+    let err = state.snapshot_all_repos().await.unwrap_err();
+    assert!(err.to_string().contains("snapshot"), "{err:#}");
 }

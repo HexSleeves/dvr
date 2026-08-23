@@ -5,3 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+jj-lib.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+bg-proto = { path = "../bg-proto" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -124,6 +124,7 @@ pub async fn req_json(
 }
 
 /// GET returning the raw body — for the /file route (application/octet-stream).
+#[allow(dead_code)] // each test binary compiles its own common module
 pub async fn req_raw(socket: &Path, path: &str) -> (StatusCode, Vec<u8>) {
     let (status, bytes) = try_req(socket, "GET", path, None).await.expect("request failed");
     (status, bytes.to_vec())
@@ -132,6 +133,7 @@ pub async fn req_raw(socket: &Path, path: &str) -> (StatusCode, Vec<u8>) {
 /// Creates a one-commit git repo at `base/name` (wiping any previous run's
 /// leftovers). Duplicated from bg-engine's test fixture — test helpers aren't
 /// shared across packages.
+#[allow(dead_code)] // each test binary compiles its own common module
 pub fn fixture_repo(base: &str, name: &str) -> String {
     let dir = Path::new(base).join(name);
     let _ = std::fs::remove_dir_all(&dir);

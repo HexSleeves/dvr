@@ -11,11 +11,33 @@ use hyperlocal::{UnixClientExt, UnixConnector, Uri};
 
 pub struct TestDaemon {
     pub socket: PathBuf,
-    _state: TempDirGuard,
+    task: tokio::task::JoinHandle<()>,
+    /// `Some` when the daemon owns its state dir (`spawn_daemon`); `None` when
+    /// the caller owns it (`spawn_daemon_in`) so it survives daemon restarts.
+    _state: Option<TempDirGuard>,
+}
+
+impl TestDaemon {
+    /// Simulates a daemon crash: aborts the in-process daemon task and removes
+    /// its socket. The state dir and the repos' `.jj` dirs survive untouched,
+    /// so a later `spawn_daemon_in` on the same state dir is a restart.
+    #[allow(dead_code)] // each test binary compiles its own common; used by daemon_restart.rs
+    pub async fn shutdown(self) {
+        self.task.abort();
+        let _ = self.task.await; // wait for the abort so the daemon state is dropped
+        let _ = std::fs::remove_file(&self.socket);
+    }
 }
 
 /// Removes the daemon state dir when the test is done.
 pub struct TempDirGuard(PathBuf);
+
+impl TempDirGuard {
+    #[allow(dead_code)] // each test binary compiles its own common; used by daemon_restart.rs
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
 
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
@@ -25,18 +47,33 @@ impl Drop for TempDirGuard {
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Spawns `bg_daemon::run_with_dir` on a fresh state dir directly under /tmp
-/// (unix socket paths must stay well under the ~100-byte `sun_path` limit) and
-/// waits until `/health` answers. No env mutation — parallel-safe.
-pub async fn spawn_daemon() -> TestDaemon {
+/// Creates a fresh state dir directly under /tmp (unix socket paths must stay
+/// well under the ~100-byte `sun_path` limit). The guard removes it on drop —
+/// hold it across daemon restarts within a test.
+pub fn fresh_state_dir() -> TempDirGuard {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = PathBuf::from(format!("/tmp/bg-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("bgd.sock");
+    TempDirGuard(dir)
+}
 
-    let run_dir = dir.clone();
-    tokio::spawn(async move {
+/// Spawns `bg_daemon::run_with_dir` on a fresh state dir and waits until
+/// `/health` answers. No env mutation — parallel-safe.
+#[allow(dead_code)] // each test binary compiles its own common; daemon_restart.rs doesn't use it
+pub async fn spawn_daemon() -> TestDaemon {
+    let state = fresh_state_dir();
+    let mut daemon = spawn_daemon_in(&state.0).await;
+    daemon._state = Some(state);
+    daemon
+}
+
+/// Spawns a daemon on an existing state dir the CALLER owns — the state
+/// survives `shutdown`, so tests can stop and restart "the same" daemon.
+pub async fn spawn_daemon_in(dir: &Path) -> TestDaemon {
+    let socket = dir.join("bgd.sock");
+    let run_dir = dir.to_path_buf();
+    let task = tokio::spawn(async move {
         if let Err(err) = bg_daemon::run_with_dir(run_dir).await {
             eprintln!("daemon exited with error: {err:#}");
         }
@@ -44,7 +81,7 @@ pub async fn spawn_daemon() -> TestDaemon {
 
     for _ in 0..200 {
         if let Ok((StatusCode::OK, _)) = try_req(&socket, "GET", "/health", None).await {
-            return TestDaemon { socket, _state: TempDirGuard(dir) };
+            return TestDaemon { socket, task, _state: None };
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

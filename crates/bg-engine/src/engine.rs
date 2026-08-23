@@ -197,23 +197,36 @@ impl RepoEngine {
     /// directly to keep `log`/`resolve_change` synchronous.
     fn visible_commits(&self) -> anyhow::Result<Vec<Commit>> {
         let view = self.repo.view();
-        let mut queue: Vec<CommitId> = view.heads().iter().cloned().collect();
-        queue.extend(view.wc_commit_ids().values().cloned());
+        // Depth-first from the visible heads (+ wc commits), emitting each
+        // commit on DFS exit; the reversed post-order is a topological order
+        // (every commit before all of its ancestors).
+        let mut stack: Vec<(CommitId, bool)> = view
+            .heads()
+            .iter()
+            .cloned()
+            .chain(view.wc_commit_ids().values().cloned())
+            .map(|id| (id, false))
+            .collect();
         let mut seen: HashSet<CommitId> = HashSet::new();
         let mut commits = Vec::new();
-        while let Some(id) = queue.pop() {
+        while let Some((id, exiting)) = stack.pop() {
+            if exiting {
+                commits.push(self.repo.store().get_commit(&id)?);
+                continue;
+            }
             if !seen.insert(id.clone()) {
                 continue;
             }
             let commit = self.repo.store().get_commit(&id)?;
-            queue.extend(commit.parent_ids().iter().cloned());
-            commits.push(commit);
+            stack.push((id, true));
+            stack.extend(commit.parent_ids().iter().cloned().map(|p| (p, false)));
         }
-        commits.sort_by(|a, b| {
-            let ta = a.committer().timestamp.timestamp.0;
-            let tb = b.committer().timestamp.timestamp.0;
-            tb.cmp(&ta).then_with(|| a.id().cmp(b.id()))
-        });
+        commits.reverse();
+        // Newest first — but STABLE, so commits sharing a committer second
+        // (batch scripts, agents) keep the topological child-before-parent
+        // order instead of falling into arbitrary id order (a dogfooding bug:
+        // `bg log` showed a parent above its child).
+        commits.sort_by_key(|c| std::cmp::Reverse(c.committer().timestamp.timestamp.0));
         Ok(commits)
     }
 

@@ -33,3 +33,41 @@ async fn resolve_change_rejects_unknown_prefix() {
     let engine = RepoEngine::open_or_init(dir.path(), make_settings("T", "t@t").unwrap()).await.unwrap();
     assert!(engine.resolve_change("zzzzzzzzzzzz9999").is_err());
 }
+
+/// Batch commits (scripts, agents) land in the same second. Dogfooding v1 on
+/// this repo showed `bg log` rendering a parent ABOVE its child when their
+/// committer timestamps tied — the sort fell back to arbitrary commit-id
+/// order. Log order must stay topological (child before parent) within ties.
+#[tokio::test]
+async fn log_orders_same_second_commits_child_first() {
+    let dir = tempfile::tempdir().unwrap();
+    // A 3-commit chain whose committer timestamps are all identical.
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "2026-01-02T03:04:05Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-02T03:04:05Z")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-b", "main"]);
+    for (file, msg) in [("a.txt", "first"), ("b.txt", "second"), ("c.txt", "third")] {
+        std::fs::write(dir.path().join(file), msg).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", msg]);
+    }
+
+    let engine = RepoEngine::open_or_init(dir.path(), make_settings("T", "t@t").unwrap()).await.unwrap();
+    let log = engine.log(10).unwrap();
+    assert!(log[0].is_working_copy, "wc commit (fresh timestamp) must come first: {log:?}");
+    let descs: Vec<&str> = log[1..].iter().map(|e| e.description.trim()).collect();
+    // Trailing "" is the jj root commit (timestamp 0, empty description).
+    assert_eq!(
+        descs,
+        ["third", "second", "first", ""],
+        "same-timestamp commits must keep topological child-before-parent order"
+    );
+}

@@ -87,11 +87,21 @@ impl crate::RepoEngine {
     }
 
     /// Snapshots every registered workspace. Returns whether any of them had
-    /// changes.
+    /// changes. A workspace whose directory vanished (`rm -rf` is the
+    /// documented way to drop one) is skipped with a warning — same policy as
+    /// `load_extra_workspaces` — so one deleted clone can't take down
+    /// status/log/snapshot for the whole repo. It stays listed: its changes
+    /// live in the store and the view still knows it.
     pub async fn snapshot_all(&mut self) -> anyhow::Result<bool> {
         let names: Vec<String> = self.workspaces.keys().cloned().collect();
         let mut any = false;
         for n in names {
+            let root = self.workspaces[&n].workspace_root();
+            if !root.is_dir() {
+                tracing::warn!(workspace = %n, root = %root.display(),
+                    "skipping snapshot: workspace directory vanished");
+                continue;
+            }
             any |= self.snapshot(&n).await?;
         }
         Ok(any)

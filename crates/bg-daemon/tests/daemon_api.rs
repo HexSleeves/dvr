@@ -157,6 +157,45 @@ async fn workspace_create_and_list() {
     let _ = std::fs::remove_dir_all(&ws_dir);
 }
 
+/// Deleting a workspace is documented as "just rm -rf" — a vanished workspace
+/// dir must not break /status, /log, or /snapshot for the whole repo (the
+/// vanished workspace is skipped; the default workspace keeps snapshotting).
+#[tokio::test]
+async fn vanished_workspace_dir_does_not_break_repo_routes() {
+    let d = common::spawn_daemon().await;
+    let repo_dir = common::fixture_repo("/tmp", "bgtest-wsgone");
+    let ws_dir = std::path::PathBuf::from("/tmp/bgtest-wsgone-w1");
+    let _ = std::fs::remove_dir_all(&ws_dir);
+
+    let (st, info) = common::req_json(&d.socket, "POST", "/repos", Some(json!({"path": repo_dir.clone()}))).await;
+    assert_eq!(st, 200, "{info}");
+    let id = info["id"].as_str().unwrap();
+
+    let (st, ws) = common::req_json(&d.socket, "POST", &format!("/repos/{id}/workspaces"),
+        Some(json!({"name": "w1"}))).await;
+    assert_eq!(st, 200, "{ws}");
+    std::fs::remove_dir_all(&ws_dir).unwrap();
+
+    // Every read route must survive the vanished dir...
+    let (st, status) = common::req_json(&d.socket, "GET", &format!("/repos/{id}/status"), None).await;
+    assert_eq!(st, 200, "status must skip the vanished workspace: {status}");
+    let (st, log) = common::req_json(&d.socket, "GET", &format!("/repos/{id}/log"), None).await;
+    assert_eq!(st, 200, "{log}");
+
+    // ...and the default workspace must still snapshot.
+    std::fs::write(std::path::Path::new(&repo_dir).join("after-rm.rs"), "fn a(){}").unwrap();
+    let (st, r) = common::req_json(&d.socket, "POST", &format!("/repos/{id}/snapshot"), None).await;
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(r["changed"], true, "default must still snapshot: {r}");
+
+    // The vanished workspace is still LISTED (its changes live in the store;
+    // only snapshotting skips it).
+    let (st, list) = common::req_json(&d.socket, "GET", &format!("/repos/{id}/workspaces"), None).await;
+    assert_eq!(st, 200);
+    let names: Vec<&str> = list.as_array().unwrap().iter().map(|w| w["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["default", "w1"], "{list}");
+}
+
 #[tokio::test]
 async fn file_returns_raw_bytes_and_404_on_missing_path() {
     let d = common::spawn_daemon().await;

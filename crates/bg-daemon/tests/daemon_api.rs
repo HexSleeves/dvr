@@ -174,3 +174,48 @@ async fn file_returns_raw_bytes_and_404_on_missing_path() {
     let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(err["code"], "not_found", "{err}");
 }
+
+#[tokio::test]
+async fn push_route_guards_then_lands_named_branch() {
+    let d = common::spawn_daemon().await;
+    let repo_dir = common::fixture_repo("/tmp", "bgtest-push");
+    // A bare remote next to the fixture repo, registered as `origin`.
+    let remote = format!("{repo_dir}-remote.git");
+    let _ = std::fs::remove_dir_all(&remote);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "--bare", &remote]);
+    git(&["-C", &repo_dir, "remote", "add", "origin", &remote]);
+
+    let (st, info) = common::req_json(&d.socket, "POST", "/repos", Some(json!({"path": repo_dir}))).await;
+    assert_eq!(st, 200, "{info}");
+    let id = info["id"].as_str().unwrap().to_string();
+
+    let (st, _) = common::req_json(&d.socket, "POST", &format!("/repos/{id}/describe"),
+        Some(json!({"workspace": null, "change_id": null, "message": "feat: push me"}))).await;
+    assert_eq!(st, 200);
+
+    // Guardrail: first push to a branch that doesn't exist on the remote
+    // requires create=true — refused as 403 guardrail_refused.
+    let (st, err) = common::req_json(&d.socket, "POST", &format!("/repos/{id}/push"),
+        Some(json!({"change_id": null, "remote": "origin", "bookmark": "feat/x", "create": false}))).await;
+    assert_eq!(st, 403, "{err}");
+    assert_eq!(err["code"], "guardrail_refused", "{err}");
+    assert!(err["message"].as_str().unwrap().contains("create"), "{err}");
+
+    // With create=true the push lands and the response states the destination.
+    let (st, resp) = common::req_json(&d.socket, "POST", &format!("/repos/{id}/push"),
+        Some(json!({"change_id": null, "remote": "origin", "bookmark": "feat/x", "create": true}))).await;
+    assert_eq!(st, 200, "{resp}");
+    assert_eq!(resp["remote"], "origin");
+    assert_eq!(resp["bookmark"], "feat/x");
+    assert!(!resp["commit_id"].as_str().unwrap().is_empty());
+
+    let heads = std::process::Command::new("git").args(["ls-remote", "--heads", &remote]).output().unwrap();
+    let heads = String::from_utf8(heads.stdout).unwrap();
+    assert!(heads.contains("refs/heads/feat/x"), "{heads}");
+
+    let _ = std::fs::remove_dir_all(&remote);
+}

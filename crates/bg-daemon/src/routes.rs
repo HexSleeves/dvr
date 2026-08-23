@@ -4,8 +4,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bg_proto::{
-    ApiError, DescribeRequest, ErrorCode, FileQuery, LogEntry, NewWorkspaceRequest,
-    RegisterRequest, RepoInfo, StatusResponse, WorkspaceInfo,
+    ApiError, DescribeRequest, ErrorCode, FileQuery, LogEntry, NewWorkspaceRequest, PushRequest,
+    PushResponse, RegisterRequest, RepoInfo, StatusResponse, WorkspaceInfo,
 };
 use serde_json::json;
 
@@ -20,6 +20,7 @@ pub fn router(state: DaemonState) -> Router {
         .route("/repos/{id}/describe", post(describe))
         .route("/repos/{id}/snapshot", post(snapshot))
         .route("/repos/{id}/workspaces", post(workspace_new).get(workspace_list))
+        .route("/repos/{id}/push", post(push))
         .route("/repos/{id}/file", get(file))
         .with_state(state)
 }
@@ -225,6 +226,25 @@ async fn workspace_list(
     // Sync accessor; no jj future is awaited, so no run_engine detour needed.
     let engine = handle.lock().await;
     Ok(Json(engine.list_workspaces()))
+}
+
+/// POST /repos/{id}/push — thin passthrough to `RepoEngine::push`. All push
+/// guardrails (explicit remote+bookmark, described change, create=true for a
+/// new remote branch) live in the engine; refusals arrive here as
+/// `EngineError::Guardrail` and map to 403 guardrail_refused.
+async fn push(
+    State(st): State<DaemonState>,
+    Path(id): Path<String>,
+    Json(req): Json<PushRequest>,
+) -> Result<Json<PushResponse>, ApiFailure> {
+    let (_, handle) = st.resolve(&id).await.ok_or_else(|| ApiFailure::unknown_repo(&id))?;
+    let resp = run_engine(move || async move {
+        let mut engine = handle.lock().await;
+        engine.push("default", &req).await
+    })
+    .await
+    .map_err(ApiFailure::from_engine)?;
+    Ok(Json(resp))
 }
 
 /// GET /repos/{id}/file — intentionally does NOT snapshot: file reads must be

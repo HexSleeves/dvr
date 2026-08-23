@@ -19,7 +19,6 @@ use crate::snapshot::{short_change_id, short_commit_id};
 
 pub struct RepoEngine {
     pub(crate) root: PathBuf,
-    pub(crate) settings: UserSettings,
     pub(crate) repo: Arc<ReadonlyRepo>,
     pub(crate) workspaces: HashMap<String, Workspace>,
 }
@@ -52,7 +51,7 @@ impl RepoEngine {
         crate::workspace_ops::load_extra_workspaces(&settings, &workspace, &repo, &mut workspaces)?;
         workspaces.insert("default".to_string(), workspace);
 
-        Ok(Self { root: root.to_path_buf(), settings, repo, workspaces })
+        Ok(Self { root: root.to_path_buf(), repo, workspaces })
     }
 
     /// Reports the current state of every workspace: working-copy change /

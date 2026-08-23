@@ -2,7 +2,7 @@ pub mod routes;
 pub mod state;
 pub mod watcher;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `$BG_STATE_DIR`, else `~/.local/state/bg`.
 pub fn state_dir() -> PathBuf {
@@ -31,8 +31,21 @@ pub async fn run() -> anyhow::Result<()> {
 /// Serves on `dir/bgd.sock` with registry and repos loaded from `dir`. Split
 /// from `run()` so tests can point each daemon at its own state dir without
 /// mutating the process environment (parallel-safe).
+///
+/// Singleton per state dir: two daemons rebinding the same socket would both
+/// write the same repos' op stores. A live daemon (its socket answers
+/// `/health`) makes this fail fast, and an exclusive flock on `bgd.lock` —
+/// held for the daemon's lifetime, released by the kernel on any exit —
+/// collapses racing auto-starts (`bg`'s client spawns bgd optimistically):
+/// the loser exits before touching the winner's socket, and the client's
+/// health polling settles on the winner.
 pub async fn run_with_dir(dir: PathBuf) -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir)?;
+    let sock = dir.join("bgd.sock");
+    if sock.exists() && health_answers(&sock).await {
+        anyhow::bail!("bgd already running (socket {} answers /health)", sock.display());
+    }
+    let _lock = singleton_lock(&dir)?;
     // Pidfile so out-of-process supervisors (and the CLI e2e tests) can find
     // and stop this daemon. Best-effort: in-process test daemons share a pid.
     let _ = std::fs::write(dir.join("bgd.pid"), std::process::id().to_string());
@@ -47,10 +60,42 @@ pub async fn run_with_dir(dir: PathBuf) -> anyhow::Result<()> {
     let roots = state.workspace_roots().await;
     state.set_watcher(watcher::spawn(state.clone(), roots)?);
 
-    let sock = dir.join("bgd.sock");
+    // Only the lock holder may remove/rebind the socket (a losing racer must
+    // never tear down the winner's).
     let _ = std::fs::remove_file(&sock);
     let listener = tokio::net::UnixListener::bind(&sock)?;
     tracing::info!(socket = %sock.display(), "bgd listening");
     axum::serve(listener, routes::router(state)).await?;
     Ok(())
+}
+
+/// Takes the exclusive advisory lock on `dir/bgd.lock`. The returned handle
+/// must stay alive for the daemon's lifetime; flock(2) drops it automatically
+/// when the process (or the last handle) dies, so a crashed daemon never
+/// blocks the next start. Works in-process too (each `File` is its own open
+/// file description), which is what the singleton test exercises.
+fn singleton_lock(dir: &Path) -> anyhow::Result<std::fs::File> {
+    let path = dir.join("bgd.lock");
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+        |_| anyhow::anyhow!("bgd already running (could not lock {})", path.display()),
+    )?;
+    Ok(file)
+}
+
+/// True when a live daemon answers `GET /health` on `sock`. A stale socket
+/// file (daemon crashed) refuses the connection and reports false.
+async fn health_answers(sock: &Path) -> bool {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let probe = async {
+        let mut stream = tokio::net::UnixStream::connect(sock).await.ok()?;
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: bgd\r\nConnection: close\r\n\r\n")
+            .await
+            .ok()?;
+        let mut buf = [0u8; 32];
+        let n = stream.read(&mut buf).await.ok()?;
+        std::str::from_utf8(&buf[..n]).ok()?.starts_with("HTTP/1.1 200").then_some(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(1), probe).await == Ok(Some(()))
 }

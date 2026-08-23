@@ -16,6 +16,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 dirs.workspace = true
+rustix.workspace = true
 bg-proto = { path = "../bg-proto" }
 bg-engine = { path = "../bg-engine" }
 

@@ -17,10 +17,29 @@ pub(crate) fn short_commit_id(commit: &Commit) -> String {
 }
 
 impl crate::RepoEngine {
-    /// Snapshots one workspace's working-copy tree into a new commit,
-    /// mirroring jj-cli's `maybe_snapshot` / `snapshot_working_copy`
-    /// (`cli/src/cli_util.rs`). Returns whether anything changed.
+    /// Snapshots one workspace, mirroring jj-cli's colocated `snapshot_impl`
+    /// (`cli/src/cli_util.rs`): for the default workspace (the one sharing
+    /// its working copy with `.git`), the Git HEAD is imported BEFORE the
+    /// tree snapshot — so an external `git commit`/`switch` moves the
+    /// working-copy parent instead of being absorbed as a file delta — and
+    /// Git refs are imported after. Returns whether anything changed.
     pub async fn snapshot(&mut self, ws: &str) -> anyhow::Result<bool> {
+        let colocated = ws == "default";
+        let mut changed = false;
+        if colocated {
+            changed |= self.import_head_from_git().await?;
+        }
+        changed |= self.snapshot_tree(ws).await?;
+        if colocated {
+            changed |= self.import_refs_from_git().await?;
+        }
+        Ok(changed)
+    }
+
+    /// Snapshots one workspace's working-copy tree into a new commit,
+    /// mirroring jj-cli's `snapshot_working_copy` (`cli/src/cli_util.rs`).
+    /// Returns whether anything changed.
+    async fn snapshot_tree(&mut self, ws: &str) -> anyhow::Result<bool> {
         let wc_commit = self.wc_commit(ws)?;
         let workspace = self
             .workspaces

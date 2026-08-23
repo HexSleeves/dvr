@@ -16,3 +16,5 @@ bg-proto = { path = "../bg-proto" }
 
 [dev-dependencies]
 tempfile.workspace = true
+# Tests assert against jj-lib types leaked by the engine API (Commit ids).
+jj-lib.workspace = true

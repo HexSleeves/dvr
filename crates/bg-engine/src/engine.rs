@@ -39,7 +39,7 @@ impl RepoEngine {
         } else {
             let (mut workspace, repo) =
                 Workspace::init_external_git(&settings, root, &root.join(".git")).await?;
-            let repo = import_existing_git_refs(repo).await?;
+            let repo = import_git_refs(repo).await?;
             let repo = import_git_head(&mut workspace, repo).await?;
             (workspace, repo)
         };
@@ -273,6 +273,41 @@ impl RepoEngine {
         }
     }
 
+    /// Re-imports the colocated Git repo's HEAD, checking it out as the
+    /// default workspace's working-copy parent if it moved. Runs BEFORE every
+    /// default-workspace tree snapshot (mirroring jj-cli's colocated
+    /// `snapshot_impl`, `cli/src/cli_util.rs`), so external `git
+    /// commit`/`switch`/`pull` in a registered repo stay visible — and a moved
+    /// HEAD's file delta is never absorbed into the current working-copy
+    /// change. Cheap when nothing moved: `import_head` records no view change,
+    /// so no operation is committed (jj-cli relies on the same guard).
+    pub(crate) async fn import_head_from_git(&mut self) -> anyhow::Result<bool> {
+        let workspace = self
+            .workspaces
+            .get_mut("default")
+            .ok_or_else(|| crate::EngineError::NotFound("no workspace default".to_string()))?;
+        let new_repo = import_git_head(workspace, self.repo.clone()).await?;
+        let changed = !Arc::ptr_eq(&new_repo, &self.repo);
+        self.repo = new_repo;
+        Ok(changed)
+    }
+
+    /// Re-imports Git branches/tags AFTER a tree snapshot (jj-cli's order in
+    /// `snapshot_impl`: the just-snapshotted working-copy commit's ref may not
+    /// be exported yet, which is fine — it would be conflicted anyway). A
+    /// moved ref can rewrite commits, so descendants are rebased inside
+    /// `import_git_refs` and the default workspace's on-disk state is
+    /// re-synced here.
+    pub(crate) async fn import_refs_from_git(&mut self) -> anyhow::Result<bool> {
+        let new_repo = import_git_refs(self.repo.clone()).await?;
+        if Arc::ptr_eq(&new_repo, &self.repo) {
+            return Ok(false);
+        }
+        self.repo = new_repo;
+        self.sync_wc_after_tx("default").await?;
+        Ok(true)
+    }
+
     pub fn wc_commit(&self, ws: &str) -> anyhow::Result<jj_lib::commit::Commit> {
         let workspace = self
             .workspaces
@@ -342,10 +377,14 @@ fn changed_files(before: &MergedTree, after: &MergedTree) -> anyhow::Result<Vec<
     Ok(out)
 }
 
-/// Imports existing Git refs (branches/tags) into a freshly-initialized jj
-/// repo so that pre-existing Git history is visible, mirroring the sequence
-/// in jj-cli's `git init --git-repo` (`cli/src/commands/git/init.rs`).
-async fn import_existing_git_refs(repo: Arc<ReadonlyRepo>) -> anyhow::Result<Arc<ReadonlyRepo>> {
+/// Imports Git refs (branches/tags) into the jj view: at init so pre-existing
+/// Git history is visible (jj-cli `git init --git-repo`,
+/// `cli/src/commands/git/init.rs`), and per snapshot so externally moved refs
+/// stay visible (jj-cli `import_git_refs`, `cli/src/cli_util.rs`). Returns
+/// the SAME `Arc` when nothing changed, so callers can detect movement via
+/// `Arc::ptr_eq`. Ref imports can rewrite/abandon commits, so descendants are
+/// rebased before committing (`commit()` asserts `!has_rewrites()`).
+async fn import_git_refs(repo: Arc<ReadonlyRepo>) -> anyhow::Result<Arc<ReadonlyRepo>> {
     let mut tx = repo.start_transaction();
     let options = GitImportOptions {
         abandon_unreachable_commits: false,
@@ -354,6 +393,7 @@ async fn import_existing_git_refs(repo: Arc<ReadonlyRepo>) -> anyhow::Result<Arc
     };
     import_refs(tx.repo_mut(), &options).await?;
     if tx.repo().has_changes() {
+        tx.repo_mut().rebase_descendants().await?;
         Ok(tx.commit("import git refs").await?)
     } else {
         Ok(repo)

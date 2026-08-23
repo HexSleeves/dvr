@@ -52,7 +52,7 @@ pub async fn run_with_dir(dir: PathBuf) -> anyhow::Result<()> {
     let state = state::DaemonState::load(&dir).await?;
     // Crash-safety: re-scan every registered repo BEFORE serving, so edits
     // made while the daemon was down land in the oplog (spec: error handling).
-    state.snapshot_all_repos().await;
+    state.snapshot_all_repos().await?;
 
     // Auto-snapshot on file changes: watch every workspace root of every
     // registered repo; roots appearing later (register, workspace-new) are

@@ -40,3 +40,17 @@ async fn changes_made_while_daemon_down_are_snapshotted_on_startup() {
     );
     assert_eq!(body, b"made while down");
 }
+
+#[tokio::test]
+async fn startup_scan_surfaces_repo_snapshot_failures() {
+    let state_dir = common::fresh_state_dir();
+    let repo_dir = common::fixture_repo("/tmp", "bgtest-startup-scan-failure");
+    let state = bg_daemon::state::DaemonState::load(state_dir.path()).await.unwrap();
+    state.register(std::path::Path::new(&repo_dir)).await.unwrap();
+
+    // Force the same failure startup can encounter after loading its
+    // registry. Readiness must not silently continue after this scan fails.
+    std::fs::remove_dir_all(std::path::Path::new(&repo_dir).join(".jj/working_copy")).unwrap();
+    let err = state.snapshot_all_repos().await.unwrap_err();
+    assert!(err.to_string().contains("snapshot"), "{err:#}");
+}

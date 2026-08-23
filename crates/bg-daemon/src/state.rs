@@ -227,20 +227,21 @@ impl DaemonState {
         infos
     }
 
-    /// Snapshots every registered repo. Failures are logged, not fatal — one
-    /// broken repo must not take the daemon down.
-    pub async fn snapshot_all_repos(&self) {
+    /// Snapshots every registered repo before the daemon serves requests.
+    /// Any failure blocks readiness: claiming a successful crash-recovery
+    /// scan while one repo still has unrecorded drift would violate the
+    /// daemon's startup guarantee.
+    pub async fn snapshot_all_repos(&self) -> anyhow::Result<()> {
         let handles: Vec<RepoHandle> = self.inner.repos.read().await.values().cloned().collect();
         for h in handles {
             let engine = h.engine.clone();
-            let result = run_engine(move || async move {
+            run_engine(move || async move {
                 engine.lock().await.snapshot_all().await.map(|_| ())
             })
-            .await;
-            if let Err(err) = result {
-                tracing::warn!(id = %h.info.id.0, "snapshot failed: {err:#}");
-            }
+            .await
+            .map_err(|err| anyhow::anyhow!("startup snapshot failed for repo {}: {err:#}", h.info.id.0))?;
         }
+        Ok(())
     }
 
     /// Atomically rewrites `repos.json` (write tmp + rename).

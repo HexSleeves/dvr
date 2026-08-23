@@ -39,11 +39,14 @@ The full command set:
 
 Deleting a workspace is just `rm -rf` — every state it ever held is already in the store.
 
+Workspaces are cloned from the default workspace's current files. With `bg ws new -r X`, those files become a new change whose parent is `X`; bg does not replace them with `X`'s tree.
+
 ## Guardrails
 
 - **Never auto-push.** No background operation ever touches a remote. Only `bg push` writes to one.
 - **Explicit push targets.** Every push states exactly which remote and bookmark it writes to; there is no "push to wherever this tracks". Pushing a bookmark that does not exist on the remote is refused unless you pass `--create`.
 - **No implicit branch tracking.** New changes never silently attach themselves to a remote branch.
+- **One op-store writer.** Do not run `jj` commands inside registered repos; bg owns their `.jj` state. Plain `git` commands in the registered root are supported, and moved Git HEADs and refs are imported on the next snapshot.
 
 ## State
 
@@ -56,3 +59,4 @@ Crash safety: on startup the daemon re-scans every registered repo and snapshots
 - macOS only — the watcher uses FSEvents and workspaces use APFS `clonefile`.
 - No MCP server yet; agents get native tools over the same API in v2.
 - No `--track` auto-rebase of workspaces against main; that is v3.
+- A cloned workspace keeps a point-in-time copy of `.git` for Git-based tools. That copy is not synchronized in v1 and can become stale until workspace Git export lands.

@@ -4,8 +4,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bg_proto::{
-    ApiError, DescribeRequest, ErrorCode, FileQuery, LogEntry, RegisterRequest, RepoInfo,
-    StatusResponse,
+    ApiError, DescribeRequest, ErrorCode, FileQuery, LogEntry, NewWorkspaceRequest,
+    RegisterRequest, RepoInfo, StatusResponse, WorkspaceInfo,
 };
 use serde_json::json;
 
@@ -19,6 +19,7 @@ pub fn router(state: DaemonState) -> Router {
         .route("/repos/{id}/log", get(log))
         .route("/repos/{id}/describe", post(describe))
         .route("/repos/{id}/snapshot", post(snapshot))
+        .route("/repos/{id}/workspaces", post(workspace_new).get(workspace_list))
         .route("/repos/{id}/file", get(file))
         .with_state(state)
 }
@@ -63,6 +64,11 @@ impl ApiFailure {
             Some(bg_engine::EngineError::Guardrail(_)) => Self::new(
                 StatusCode::FORBIDDEN,
                 ErrorCode::GuardrailRefused,
+                format!("{err:#}"),
+            ),
+            Some(bg_engine::EngineError::Invalid(_)) => Self::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
                 format!("{err:#}"),
             ),
             None => Self::internal(err),
@@ -163,6 +169,51 @@ async fn snapshot(
         .await
         .map_err(ApiFailure::from_engine)?;
     Ok(Json(json!({ "changed": changed })))
+}
+
+/// POST /repos/{id}/workspaces — materializes a new workspace as a CoW clone
+/// of the repo root. Default `dest` is the sibling dir `<root>-<name>`. The
+/// new workspace dir joins the watcher so it auto-snapshots like the root.
+async fn workspace_new(
+    State(st): State<DaemonState>,
+    Path(id): Path<String>,
+    Json(req): Json<NewWorkspaceRequest>,
+) -> Result<Json<WorkspaceInfo>, ApiFailure> {
+    let (info, handle) = st.resolve(&id).await.ok_or_else(|| ApiFailure::unknown_repo(&id))?;
+    let dest = match req.dest {
+        Some(dest) => dest,
+        None => {
+            let file_name = info.root.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+                ApiFailure::invalid_request(format!(
+                    "cannot derive a default dest from {}",
+                    info.root.display()
+                ))
+            })?;
+            let parent = info.root.parent().ok_or_else(|| {
+                ApiFailure::invalid_request(format!("repo root {} has no parent dir", info.root.display()))
+            })?;
+            parent.join(format!("{file_name}-{}", req.name))
+        }
+    };
+    let ws = run_engine(move || async move {
+        let mut engine = handle.lock().await;
+        engine.add_workspace(&req.name, &dest, req.at_change.as_deref()).await
+    })
+    .await
+    .map_err(ApiFailure::from_engine)?;
+    st.watch_root(info.id, ws.path.clone());
+    Ok(Json(ws))
+}
+
+/// GET /repos/{id}/workspaces
+async fn workspace_list(
+    State(st): State<DaemonState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<WorkspaceInfo>>, ApiFailure> {
+    let (_, handle) = st.resolve(&id).await.ok_or_else(|| ApiFailure::unknown_repo(&id))?;
+    // Sync accessor; no jj future is awaited, so no run_engine detour needed.
+    let engine = handle.lock().await;
+    Ok(Json(engine.list_workspaces()))
 }
 
 /// GET /repos/{id}/file — intentionally does NOT snapshot: file reads must be

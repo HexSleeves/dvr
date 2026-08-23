@@ -1,6 +1,7 @@
 pub mod engine;
 pub mod settings;
 mod snapshot;
+mod workspace_ops;
 
 pub use engine::RepoEngine;
 
@@ -15,4 +16,8 @@ pub enum EngineError {
     /// An operation was refused by a bg guardrail.
     #[error("{0}")]
     Guardrail(String),
+    /// The request itself is bad (invalid workspace name, occupied
+    /// destination, ...).
+    #[error("{0}")]
+    Invalid(String),
 }

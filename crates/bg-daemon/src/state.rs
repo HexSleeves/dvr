@@ -141,15 +141,37 @@ impl DaemonState {
             return Err(RegisterError::Internal(err));
         }
 
-        // Auto-snapshot the new repo on file changes. A watch failure loses
-        // auto-snapshot only (explicit API calls still work), so it degrades
-        // to a warning rather than failing the registration.
-        if let Some(watcher) = self.inner.watcher.lock().unwrap().as_ref()
-            && let Err(err) = watcher.watch_path(info.id.clone(), info.root.clone())
-        {
-            tracing::warn!(id = %info.id.0, "failed to watch repo root: {err:#}");
-        }
+        // Auto-snapshot the new repo on file changes.
+        self.watch_root(info.id.clone(), info.root.clone());
         Ok(info)
+    }
+
+    /// Starts watching one root — a repo root at register time, or a new
+    /// workspace dir at ws-new time. A watch failure loses auto-snapshot only
+    /// (explicit API calls still work), so it degrades to a warning.
+    pub fn watch_root(&self, id: RepoId, root: PathBuf) {
+        if let Some(watcher) = self.inner.watcher.lock().unwrap().as_ref()
+            && let Err(err) = watcher.watch_path(id.clone(), root.clone())
+        {
+            tracing::warn!(id = %id.0, root = %root.display(), "failed to watch root: {err:#}");
+        }
+    }
+
+    /// Every root the watcher should cover: for each repo, the workspace
+    /// roots its engine knows about (the default workspace root is the repo
+    /// root). Used to seed the watcher at startup.
+    pub async fn workspace_roots(&self) -> Vec<(RepoId, PathBuf)> {
+        let handles: Vec<RepoHandle> = self.inner.repos.read().await.values().cloned().collect();
+        let mut roots = Vec::new();
+        for h in handles {
+            // Sync accessor: list_workspaces awaits no jj future, so locking
+            // on this task is fine (no !Send future crosses a thread).
+            let engine = h.engine.lock().await;
+            for ws in engine.list_workspaces() {
+                roots.push((h.info.id.clone(), ws.path));
+            }
+        }
+        roots
     }
 
     /// Installs the filesystem watcher handle (see `watcher::spawn`), keeping

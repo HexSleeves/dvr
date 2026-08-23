@@ -1,0 +1,26 @@
+[package]
+name = "dvr-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "dvr"
+path = "src/main.rs"
+
+[[bin]]
+name = "dvrd"
+path = "src/bin/dvrd.rs"
+
+[dependencies]
+clap.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+hyperlocal.workspace = true
+http-body-util.workspace = true
+tracing-subscriber.workspace = true
+dvr-proto = { path = "../dvr-proto" }
+dvr-daemon = { path = "../dvr-daemon" }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/bg-proto", "crates/bg-engine", "crates/bg-daemon", "crates/bg-cli"]
+members = ["crates/dvr-proto", "crates/dvr-engine", "crates/dvr-daemon", "crates/dvr-cli"]
 
 [workspace.package]
 version = "0.1.0"

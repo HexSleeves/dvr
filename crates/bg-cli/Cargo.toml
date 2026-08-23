@@ -1,0 +1,15 @@
+[package]
+name = "bg-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "bg"
+path = "src/main.rs"
+
+[[bin]]
+name = "bgd"
+path = "src/bin/bgd.rs"
+
+[dependencies]

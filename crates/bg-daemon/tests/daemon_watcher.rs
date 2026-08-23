@@ -29,3 +29,52 @@ async fn file_change_is_snapshotted_without_any_api_call() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
+
+#[tokio::test]
+async fn newly_created_workspace_joins_the_watcher() {
+    let d = common::spawn_daemon().await;
+    let repo_dir = common::fixture_repo("/tmp", "bgtest-watch-workspace");
+    let workspace_dir = std::path::PathBuf::from("/tmp/bgtest-watch-workspace-agent1");
+    let _ = std::fs::remove_dir_all(&workspace_dir);
+    let (st, info) =
+        common::req_json(&d.socket, "POST", "/repos", Some(json!({"path": repo_dir}))).await;
+    assert_eq!(st, 200, "{info}");
+    let id = info["id"].as_str().unwrap();
+
+    let (st, workspace) = common::req_json(
+        &d.socket,
+        "POST",
+        &format!("/repos/{id}/workspaces"),
+        Some(json!({"name": "agent1"})),
+    )
+    .await;
+    assert_eq!(st, 200, "{workspace}");
+    let initial_commit = workspace["commit_id"].as_str().unwrap().to_string();
+
+    std::fs::write(workspace_dir.join("watched-agent.txt"), "auto").unwrap();
+
+    // This accessor never snapshots. The commit id changes only after the
+    // watcher added by POST /workspaces observes and snapshots the clone.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (st, workspaces) = common::req_json(
+            &d.socket,
+            "GET",
+            &format!("/repos/{id}/workspaces"),
+            None,
+        )
+        .await;
+        assert_eq!(st, 200, "{workspaces}");
+        let agent = workspaces
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|workspace| workspace["name"] == "agent1")
+            .unwrap();
+        if agent["commit_id"] != initial_commit {
+            break;
+        }
+        assert!(Instant::now() < deadline, "new workspace never joined watcher: {workspaces}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}

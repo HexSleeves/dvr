@@ -62,6 +62,9 @@ impl ApiFailure {
             Some(bg_engine::EngineError::NotFound(_)) => {
                 Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, format!("{err:#}"))
             }
+            Some(bg_engine::EngineError::Conflict(_)) => {
+                Self::new(StatusCode::CONFLICT, ErrorCode::Conflict, format!("{err:#}"))
+            }
             Some(bg_engine::EngineError::Guardrail(_)) => Self::new(
                 StatusCode::FORBIDDEN,
                 ErrorCode::GuardrailRefused,
@@ -263,4 +266,18 @@ async fn file(
     .await
     .map_err(ApiFailure::from_engine)?;
     Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conflict_engine_error_maps_to_http_conflict() {
+        let failure = ApiFailure::from_engine(
+            bg_engine::EngineError::Conflict("path is conflicted: src/lib.rs".into()).into(),
+        );
+        assert_eq!(failure.status, StatusCode::CONFLICT);
+        assert_eq!(failure.error.code, ErrorCode::Conflict);
+    }
 }

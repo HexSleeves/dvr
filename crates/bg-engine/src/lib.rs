@@ -14,6 +14,9 @@ pub enum EngineError {
     /// A named thing (workspace, revision, path in tree) does not exist.
     #[error("{0}")]
     NotFound(String),
+    /// The requested value exists but is unresolved conflict data.
+    #[error("{0}")]
+    Conflict(String),
     /// An operation was refused by a bg guardrail.
     #[error("{0}")]
     Guardrail(String),

@@ -114,7 +114,9 @@ impl RepoEngine {
     /// prefix against the visible commits. Errors distinguish "not found"
     /// from "ambiguous".
     pub fn resolve_change(&self, prefix: &str) -> anyhow::Result<Commit> {
-        anyhow::ensure!(!prefix.is_empty(), "empty change/commit id prefix");
+        if prefix.is_empty() {
+            return Err(crate::EngineError::Invalid("empty change/commit id prefix".into()).into());
+        }
         let mut matches: Vec<Commit> = self
             .visible_commits()?
             .into_iter()
@@ -128,7 +130,10 @@ impl RepoEngine {
             ))
             .into()),
             1 => Ok(matches.pop().unwrap()),
-            n => anyhow::bail!("prefix {prefix:?} is ambiguous: {n} visible commits match"),
+            n => Err(crate::EngineError::Invalid(format!(
+                "prefix {prefix:?} is ambiguous: {n} visible commits match"
+            ))
+            .into()),
         }
     }
 
@@ -260,7 +265,7 @@ impl RepoEngine {
         let value = tree.path_value(repo_path).await?;
         let resolved = value
             .into_resolved()
-            .map_err(|_| anyhow::anyhow!("path is conflicted: {path}"))?
+            .map_err(|_| crate::EngineError::Conflict(format!("path is conflicted: {path}")))?
             .ok_or_else(|| crate::EngineError::NotFound(format!("not found: {path}")))?;
         match resolved {
             jj_lib::backend::TreeValue::File { id, .. } => {
@@ -269,7 +274,7 @@ impl RepoEngine {
                 futures::AsyncReadExt::read_to_end(&mut reader, &mut buf).await?;
                 Ok(buf)
             }
-            _ => anyhow::bail!("not a file: {path}"),
+            _ => Err(crate::EngineError::Invalid(format!("not a file: {path}")).into()),
         }
     }
 

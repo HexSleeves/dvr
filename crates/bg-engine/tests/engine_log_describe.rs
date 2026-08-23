@@ -34,6 +34,55 @@ async fn resolve_change_rejects_unknown_prefix() {
     assert!(engine.resolve_change("zzzzzzzzzzzz9999").is_err());
 }
 
+#[tokio::test]
+async fn resolve_change_marks_empty_prefix_as_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    common::fixture_git_repo(dir.path());
+    let engine = RepoEngine::open_or_init(dir.path(), make_settings("T", "t@t").unwrap()).await.unwrap();
+    let err = engine.resolve_change("").unwrap_err();
+    assert!(
+        matches!(err.downcast_ref(), Some(bg_engine::EngineError::Invalid(_))),
+        "empty prefix must be an invalid request: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn resolve_change_marks_ambiguous_prefix_as_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    common::fixture_git_repo(dir.path());
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    // Seventeen visible commits force at least two ids to share a one-digit
+    // prefix. Derive the prefix from the engine's public rendering so the
+    // test is deterministic without depending on a particular hash.
+    for n in 0..16 {
+        std::fs::write(dir.path().join(format!("{n}.txt")), n.to_string()).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", &format!("commit {n}")]);
+    }
+    let engine = RepoEngine::open_or_init(dir.path(), make_settings("T", "t@t").unwrap()).await.unwrap();
+    let mut counts = std::collections::BTreeMap::new();
+    for entry in engine.log(100).unwrap() {
+        for prefix in [entry.change_id.chars().next().unwrap(), entry.commit_id.chars().next().unwrap()] {
+            *counts.entry(prefix).or_insert(0) += 1;
+        }
+    }
+    let prefix = counts.into_iter().find(|(_, count)| *count >= 2).unwrap().0.to_string();
+    let err = engine.resolve_change(&prefix).unwrap_err();
+    assert!(err.to_string().contains("ambiguous"), "{err:#}");
+    assert!(
+        matches!(err.downcast_ref(), Some(bg_engine::EngineError::Invalid(_))),
+        "ambiguous prefix must be an invalid request: {err:#}"
+    );
+}
+
 /// Batch commits (scripts, agents) land in the same second. Dogfooding v1 on
 /// this repo showed `bg log` rendering a parent ABOVE its child when their
 /// committer timestamps tied — the sort fell back to arbitrary commit-id

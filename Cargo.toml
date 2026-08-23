@@ -10,6 +10,7 @@ rust-version = "1.89"
 [workspace.dependencies]
 jj-lib = "=0.44.0"
 tokio = { version = "1", features = ["full"] }
+futures = "0.3"
 axum = "0.8"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }

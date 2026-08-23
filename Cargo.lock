@@ -84,6 +84,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bg-proto",
+ "futures",
  "jj-lib",
  "serde",
  "tempfile",

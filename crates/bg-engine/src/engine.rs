@@ -211,6 +211,31 @@ impl RepoEngine {
         Ok(commits)
     }
 
+    /// Reads the contents of `path` in the tree of the given revision.
+    /// `rev` is a change/commit-id prefix (see `resolve_change`) or `"@"` for
+    /// the working-copy commit of the default workspace. Errors on missing
+    /// paths, conflicted paths, and non-file entries (directories, symlinks,
+    /// submodules).
+    pub async fn read_file(&self, rev: &str, path: &str) -> anyhow::Result<Vec<u8>> {
+        let commit = if rev == "@" { self.wc_commit("default")? } else { self.resolve_change(rev)? };
+        let repo_path = jj_lib::repo_path::RepoPath::from_internal_string(path)?;
+        let tree = commit.tree();
+        let value = tree.path_value(repo_path).await?;
+        let resolved = value
+            .into_resolved()
+            .map_err(|_| anyhow::anyhow!("path is conflicted: {path}"))?
+            .ok_or_else(|| anyhow::anyhow!("not found: {path}"))?;
+        match resolved {
+            jj_lib::backend::TreeValue::File { id, .. } => {
+                let mut reader = self.repo.store().read_file(repo_path, &id).await?;
+                let mut buf = Vec::new();
+                futures::AsyncReadExt::read_to_end(&mut reader, &mut buf).await?;
+                Ok(buf)
+            }
+            _ => anyhow::bail!("not a file: {path}"),
+        }
+    }
+
     pub fn wc_commit(&self, ws: &str) -> anyhow::Result<jj_lib::commit::Commit> {
         let workspace = self
             .workspaces

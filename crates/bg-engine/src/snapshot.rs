@@ -19,7 +19,8 @@ pub(crate) fn short_commit_id(commit: &Commit) -> String {
 fn ordered_workspace_names(mut names: Vec<String>) -> Vec<String> {
     names.sort();
     if let Some(default) = names.iter().position(|name| name == "default") {
-        names.swap(0, default);
+        let default_name = names.remove(default);
+        names.insert(0, default_name);
     }
     names
 }
@@ -123,10 +124,10 @@ impl crate::RepoEngine {
 mod tests {
     #[test]
     fn default_workspace_snapshots_before_secondaries() {
-        let names = vec!["zeta".to_string(), "default".to_string(), "alpha".to_string()];
+        let names = vec!["a".to_string(), "b".to_string(), "c".to_string(), "default".to_string()];
         assert_eq!(
             super::ordered_workspace_names(names),
-            ["default", "alpha", "zeta"]
+            ["default", "a", "b", "c"]
         );
     }
 }

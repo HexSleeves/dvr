@@ -228,18 +228,23 @@ impl DaemonState {
     }
 
     /// Snapshots every registered repo before the daemon serves requests.
-    /// Any failure blocks readiness: claiming a successful crash-recovery
-    /// scan while one repo still has unrecorded drift would violate the
-    /// daemon's startup guarantee.
+    /// Per-repo snapshot failures warn and continue: one broken repo (e.g.,
+    /// deleted .jj/working_copy) must not take the daemon down, since that
+    /// would prevent the API from being used to unregister the broken repo.
+    /// Readiness (/health) answers after this pass completes, regardless of
+    /// per-repo outcomes.
     pub async fn snapshot_all_repos(&self) -> anyhow::Result<()> {
         let handles: Vec<RepoHandle> = self.inner.repos.read().await.values().cloned().collect();
         for h in handles {
             let engine = h.engine.clone();
-            run_engine(move || async move {
+            let result = run_engine(move || async move {
                 engine.lock().await.snapshot_all().await.map(|_| ())
             })
-            .await
-            .map_err(|err| anyhow::anyhow!("startup snapshot failed for repo {}: {err:#}", h.info.id.0))?;
+            .await;
+            if let Err(err) = result {
+                tracing::warn!(id = %h.info.id.0, root = %h.info.root.display(),
+                    "startup snapshot failed (continuing): {err:#}");
+            }
         }
         Ok(())
     }

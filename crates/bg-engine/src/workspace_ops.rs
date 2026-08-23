@@ -130,6 +130,10 @@ impl crate::RepoEngine {
         // a later step fails (the rollback tx then starts from the right op).
         self.repo = repo;
         self.workspaces.insert(name.to_string(), new_ws);
+        let jj_gitignore = dest.join(".jj").join(".gitignore");
+        if !jj_gitignore.exists() {
+            std::fs::write(&jj_gitignore, "/*\n")?;
+        }
 
         let mut tx = self.repo.start_transaction();
         tx.repo_mut().check_out(ws_name, parent).await?;

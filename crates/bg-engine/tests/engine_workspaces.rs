@@ -8,6 +8,7 @@ async fn ws_new_is_cow_fast_and_independent() {
     std::fs::create_dir(&root).unwrap();
     common::fixture_git_repo(&root);
     // simulate a heavy dir that must NOT be re-created from scratch:
+    std::fs::write(root.join(".git/info/exclude"), "node_modules/\n").unwrap();
     std::fs::create_dir_all(root.join("node_modules/dep")).unwrap();
     std::fs::write(root.join("node_modules/dep/index.js"), "x".repeat(1024)).unwrap();
 
@@ -20,6 +21,17 @@ async fn ws_new_is_cow_fast_and_independent() {
     assert!(dest.join("README.md").is_file());
     assert!(dest.join("node_modules/dep/index.js").is_file(), "CoW clone carries build artifacts");
     assert!(dest.join(".jj").exists(), "clone is a real jj workspace");
+    let git_status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&dest)
+        .output()
+        .unwrap();
+    assert!(git_status.status.success());
+    assert!(
+        git_status.stdout.is_empty(),
+        "registering the clone must not leave .jj untracked: {}",
+        String::from_utf8_lossy(&git_status.stdout)
+    );
 
     // Independence: edit in agent1, snapshot; default's wc unchanged.
     std::fs::write(dest.join("agent-work.txt"), "hi").unwrap();

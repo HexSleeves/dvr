@@ -57,6 +57,29 @@ async fn two_workspaces_on_same_change_is_allowed() {
 }
 
 #[tokio::test]
+async fn snapshot_all_reconciles_secondaries_after_default_rewrites() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let root = dir.path().join("main");
+    std::fs::create_dir(&root).unwrap();
+    common::fixture_git_repo(&root);
+    let mut engine = RepoEngine::open_or_init(&root, make_settings("T", "t@t").unwrap()).await.unwrap();
+    let default_change = engine.wc_commit("default").unwrap().change_id().reverse_hex();
+    let agent = dir.path().join("agent");
+    engine.add_workspace("agent", &agent, Some(&default_change)).await.unwrap();
+
+    // The agent is a descendant of the default working-copy commit. A
+    // default rewrite rebases it, so the agent must snapshot afterward to
+    // reconcile that new stored tree with its own on-disk files.
+    std::fs::write(root.join("default-only.txt"), "default").unwrap();
+    std::fs::write(agent.join("agent-only.txt"), "agent").unwrap();
+    engine.snapshot_all().await.unwrap();
+    assert!(
+        !engine.snapshot("agent").await.unwrap(),
+        "snapshot_all left the secondary workspace out of sync"
+    );
+}
+
+#[tokio::test]
 async fn workspaces_survive_reopen() {
     let dir = tempfile::tempdir_in("/tmp").unwrap();
     let root = dir.path().join("main");

@@ -16,6 +16,14 @@ pub(crate) fn short_commit_id(commit: &Commit) -> String {
     commit.id().hex().chars().take(12).collect()
 }
 
+fn ordered_workspace_names(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    if let Some(default) = names.iter().position(|name| name == "default") {
+        names.swap(0, default);
+    }
+    names
+}
+
 impl crate::RepoEngine {
     /// Snapshots one workspace, mirroring jj-cli's colocated `snapshot_impl`
     /// (`cli/src/cli_util.rs`): for the default workspace (the one sharing
@@ -93,7 +101,10 @@ impl crate::RepoEngine {
     /// status/log/snapshot for the whole repo. It stays listed: its changes
     /// live in the store and the view still knows it.
     pub async fn snapshot_all(&mut self) -> anyhow::Result<bool> {
-        let names: Vec<String> = self.workspaces.keys().cloned().collect();
+        // The default snapshot may import Git or rewrite its working-copy
+        // commit and rebase descendant workspace commits. Reconcile every
+        // secondary only after those repo-wide effects have settled.
+        let names = ordered_workspace_names(self.workspaces.keys().cloned().collect());
         let mut any = false;
         for n in names {
             let root = self.workspaces[&n].workspace_root();
@@ -105,5 +116,17 @@ impl crate::RepoEngine {
             any |= self.snapshot(&n).await?;
         }
         Ok(any)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn default_workspace_snapshots_before_secondaries() {
+        let names = vec!["zeta".to_string(), "default".to_string(), "alpha".to_string()];
+        assert_eq!(
+            super::ordered_workspace_names(names),
+            ["default", "alpha", "zeta"]
+        );
     }
 }
